@@ -296,7 +296,7 @@ class FunctionStringVisitor(ida_hexrays.ctree_visitor_t):
             found = False
             while True:
                 # string size instruction must be in the function
-                if next_insn >= self.func.end_ea:
+                if next_insn > self.func.end_ea:
                     break
                 # the string size is stored as a dword in the register, and for some reason its phrase is void and not imm
                 elif insn.Op2.dtype == ida_ua.dt_dword and insn.Op2.phrase == ida_ua.o_void and insn.Op1.reg == size_reg:
@@ -316,7 +316,7 @@ class FunctionStringVisitor(ida_hexrays.ctree_visitor_t):
             # if we found the size no need to search for it again
             while not found:
                 prev_insn = ida_ua.decode_prev_insn(insn, prev_insn)
-                if prev_insn < self.func.start_ea:
+                if prev_insn < self.func.start_ea or prev_insn == BADADDR:
                     return 0
                 elif insn.Op2.dtype == ida_ua.dt_dword and insn.Op2.phrase == ida_ua.o_void and insn.Op1.reg == size_reg:
                     break
@@ -568,7 +568,7 @@ class GoAnalyzer(ida_idaapi.plugin_t):
         ida_hexrays.install_microcode_filter(self.filter, True)
 
         # create the goroutine struct if it doesn't already exist
-        if not ida_struct.get_struc_id("runtime_g"):
+        if ida_typeinf.get_named_type(None, "runtime_g", ida_typeinf.NTF_TYPE) is None:
             ida_struct.add_struc(BADADDR, "runtime_g")
         # install the r14 current goroutine optimizer
         self.optimizer = R14Optimizer()
