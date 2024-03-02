@@ -2,11 +2,11 @@
 Go fastcall analysis for ida decompiler
 
 ## Installation
-Put the GoAnalyzer.py in your plugins directory
+Put the GoAnalyzer.py and DecompilerLib dir in your plugins directory
 
 ## Motivation
 Currently, IDA Pro can't detect new [Go internal abi](https://github.com/golang/go/blob/master/src/cmd/compile/abi-internal.md)
-which is the new way of calling functions in go since go 1.17
+which is the new way of calling functions in go since go 1.17 good enough
 
 This new calling convention uses registers instead of the stack to pass parameters
 However ida detects the convention as __golang convention which passes parameters on the stack,  
@@ -22,6 +22,7 @@ which makes the decompilation look confusing
 * r14 is used as the current go routine as specified in the internal abi
   - using microcode we can show its usage like NtCurrentTeb in window
 * analyze string sizes and define them correctly
+* analyze calls to runtime functions which receive RTYPE struct and override their parameter types
 
 ## Example
 ### Without using the plugin
