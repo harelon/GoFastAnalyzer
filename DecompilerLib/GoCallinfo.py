@@ -117,7 +117,7 @@ class GoCall:
     correct_cc = (
         ida_typeinf.CM_CC_MANUAL
         if float(get_kernel_version()) <= 7.7
-        else ida_typeinf.CM_CC_SPECIAL
+        else ida_typeinf.CM_CC_GOLANG
     )
 
     def __init__(
@@ -130,7 +130,7 @@ class GoCall:
 
         self.callinfo = ida_hexrays.mcallinfo_t()
         self.callinfo.args = ida_hexrays.mcallargs_t()
-        self.callinfo.cc = self.correct_cc
+        self.callinfo.solid_args = 0
 
         self.callinfo.spoiled = ida_hexrays.mlist_t()
         self.callinfo.return_regs = ida_hexrays.mlist_t()
@@ -139,10 +139,14 @@ class GoCall:
 
         self.ret_type = "void *"
         self.ret_loc = "rax"
+
         if tinfo is not None:
             for i in range(tinfo.get_nargs()):
                 self.add_arg(tinfo.get_nth_arg(i))
             self.add_ret(tinfo.get_rettype())
+
+            self.callinfo.cc = self.correct_cc
+            self.callinfo.flags |= ida_hexrays.FCI_EXPLOCS
 
     def get_decl_string(self) -> str:
         """Format the function prototype from our known args and return values"""
@@ -151,7 +155,7 @@ class GoCall:
         else:
             return f"void __usercall func({','.join(self.__args)});"
 
-    def upsert_stack_struct(self, tinfo: ida_typeinf.tinfo_t):
+    def upsert_stack_struct(self, tinfo: ida_typeinf.tinfo_t) -> ida_typeinf.tinfo_t:
         gap_range = ida_range.rangeset_t()
         tinfo.calc_gaps(gap_range)
         if not gap_range.empty():
@@ -180,7 +184,7 @@ class GoCall:
         reg_count = self.reg_count
         if is_return:
             reg_count = 0
-        # loc = ida_hexrays.vdloc_t()
+
         if (
             not GoTypeAssigner(loc_list).assign_type(tinfo)
             or len(loc_list) > self.max_reg - reg_count
@@ -203,15 +207,12 @@ class GoCall:
                 argpart = ida_typeinf.argpart_t()
                 argpart.off = current_offset
                 argpart.size = arg_size
-                argpart.set_reg1(
-                    ida_hexrays.reg2mreg(
-                        ida_idp.str2reg(
-                            get_sized_register_by_name(
-                                go_fast_convention[reg_count], arg_size
-                            )
-                        )
-                    )
+                reg = ida_idp.str2reg(
+                    get_sized_register_by_name(go_fast_convention[reg_count], arg_size)
                 )
+                if not is_return:
+                    reg = ida_hexrays.reg2mreg(reg)
+                argpart.set_reg1(reg)
                 scattered.push_back(argpart)
 
                 # align offset if not aligned
@@ -245,10 +246,13 @@ class GoCall:
             first_scat = scattered[0]
             if first_scat.is_reg1():
                 loc.set_reg1(first_scat.reg1())
+                current_mcall.t = ida_hexrays.mop_r
                 current_mcall.argloc.set_reg1(
                     ida_hexrays.mreg2reg(loc.reg1(), first_scat.size)
                 )
+
             else:
+                current_mcall.t = ida_hexrays.mop_S
                 loc.set_stkoff(first_scat.stkoff())
                 current_mcall.argloc = loc
 
@@ -258,7 +262,6 @@ class GoCall:
             current_mcall.create_from_scattered_vdloc(
                 self.mba, None, tinfo_copy.copy(), scif
             )
-
         else:
             current_mcall.create_from_vdloc(self.mba, loc, tinfo_copy.get_size())
 
@@ -277,20 +280,28 @@ class GoCall:
         """
 
         tinfo_copy = tinfo.copy()
-        args = self.__create_argloc(tinfo_copy, False)
+        args = self.__create_argloc(tinfo_copy, True)
         scattered = []
         if args is not None:
             scattered, self.ret_loc = args[0], args[1]
 
-        loc = ida_hexrays.vdloc_t()
-
         if len(scattered) == 1:
-            loc = scattered[0]
+            arg = scattered[0]
+            if arg.is_reg1():
+                self.callinfo.return_regs.add(
+                    ida_hexrays.reg2mreg(arg.reg1()), arg.size
+                )
+                self.callinfo.spoiled.add(ida_hexrays.reg2mreg(arg.reg1()), arg.size)
+
+            self.callinfo.return_argloc = arg
 
         if len(scattered) > 1:
+            for item in scattered:
+                self.callinfo.return_regs.add(
+                    ida_hexrays.reg2mreg(item.reg1()), item.size
+                )
+                self.callinfo.spoiled.add(ida_hexrays.reg2mreg(item.reg1()), item.size)
             self.callinfo.return_argloc.consume_scattered(scattered)
-        else:
-            self.callinfo.return_argloc = loc
 
         self.ret_type = tinfo_copy.dstr()
         self.callinfo.return_type = tinfo_copy.copy()

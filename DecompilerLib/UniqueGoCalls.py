@@ -16,7 +16,7 @@ from DecompilerLib.GoCallinfo import GoCall
 from DecompilerLib.utils import BYTE_SIZE, go_fast_convention
 
 
-def translate(string: str, translation_dict: dict):
+def translate(string: str, translation_dict: dict) -> str:
     for key, value in translation_dict.items():
         string = string.replace(key, value)
     return string
@@ -34,10 +34,10 @@ class RtypeCall:
         self.initialized = False
         self.type_based_definition = re.compile("((.*?){type}(.*?))\\s")
 
-    def init(self):
+    def init(self) -> None:
         self.rtype_reg = ida_idp.str2reg(go_fast_convention[0])
 
-    def get_referenced_rtype(self, ea: int) -> str | None:
+    def get_referenced_rtype(self, ea: int) -> tuple[str, int]:
         """Returns the name of the rtype that is initialized before this ea"""
         wanted_outtype = "char *"
 
@@ -72,7 +72,7 @@ class RtypeCall:
 
         # if we have we a formatted declaration which contains the {type}
         # and a slice is created from it but the slice type doesn't exist in the local typedefs
-        # then create it from
+        # then create it from the information we know
         if typedef:
             translated_definition = translate(typedef.group(1), starting_dict)
             if (
@@ -126,7 +126,7 @@ class RtypeCall:
 
     def get_decl_mi(
         self, mba: ida_hexrays.mba_t, call_ea: int, callee_ea: int
-    ) -> ida_typeinf.tinfo_t:
+    ) -> ida_hexrays.mcallinfo_t:
         translator = self.fill_vars(call_ea)
         if translator is None:
             return None
@@ -139,8 +139,8 @@ class RtypeCall:
         ):
             print(f'Error parsing -> "{actual_definition}"')
             return
-        callinfo = GoCall(mba, callee_ea, tinfo)
 
+        callinfo = GoCall(mba, callee_ea, tinfo)
         return callinfo.callinfo
 
 
@@ -155,9 +155,8 @@ class MapCall(RtypeCall):
     def __init__(self, *args) -> None:
         super().__init__(*args)
         self.search_pattern = re.compile("\[(.*?)\](.*)$")
-        # self.func_pattern   = re.compile(".*Op$")
 
-    def init(self):
+    def init(self) -> None:
         super().init()
         # if we don't have type definitions we can't parse the rtype for the mapcall
         self.rtype_tinfo = ida_typeinf.tinfo_t()
@@ -204,7 +203,7 @@ class MapCall(RtypeCall):
             ida_enum.get_enum_member_by_name("KIND_FUNC")
         )
 
-    def fill_vars(self, ea: int) -> str | None:
+    def fill_vars(self, ea: int) -> dict[str, str] | None:
 
         starting_dict = super().fill_vars(ea)
         if self.disabled:

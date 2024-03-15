@@ -6,6 +6,7 @@ import ida_ua
 import ida_ida
 import ida_idp
 import ida_nalt
+import ida_name
 import ida_xref
 import ida_bytes
 import ida_funcs
@@ -25,15 +26,6 @@ from DecompilerLib.GoCallinfo import GoCall, get_sized_register_by_name
 
 go_version_regex = re.compile("go\\d\\.(\\d{1,2})(\\.\\d{1,2})?$")
 concat_string_number = re.compile("runtime\\.concatstring\\d")
-
-
-data_sizes_map = {
-    ida_ua.dt_byte16: 16,
-    ida_ua.dt_qword: 8,
-    ida_ua.dt_dword: 4,
-    ida_ua.dt_word: 2,
-    ida_ua.dt_byte: 1,
-}
 
 
 class Xmm15Optimizer(ida_hexrays.microcode_filter_t):
@@ -77,7 +69,7 @@ class Xmm15Optimizer(ida_hexrays.microcode_filter_t):
 
 
 class FunctionStringVisitor(ida_hexrays.ctree_visitor_t):
-    def __init__(self, cfunc: ida_hexrays.citem_t, func: ida_funcs.func_t):
+    def __init__(self, cfunc: ida_hexrays.citem_t, func: ida_funcs.func_t) -> None:
         ida_hexrays.ctree_visitor_t.__init__(self, ida_hexrays.CV_PARENTS)
         self.cfunc = cfunc
         self.func = func
@@ -129,6 +121,29 @@ class FunctionStringVisitor(ida_hexrays.ctree_visitor_t):
             return None
         return False
 
+    def instruction_stores_valid_obj(
+        self, insn: ida_ua.insn_t, obj_reg: int
+    ) -> bool | None:
+        """
+        Check if the instruction stores a valid size for our searched string,
+        if data is stored to our wanted register not in the expected format we know it's ruined,
+        if the instruction is for call, all registers are changed
+        """
+        # the string size is stored as a dword in the register, and for some reason its phrase is void and not imm
+        if (
+            insn.Op2.dtype == ida_ua.dt_qword
+            and insn.Op2.phrase == ida_ua.o_imm
+            and insn.Op1.reg == obj_reg
+        ):
+            return True
+        # if the string is used and not for our purpose then it probably won't be used for the string size
+        elif insn.Op1.reg == obj_reg:
+            return None
+        # if we arrive at a call everything changes, we can't trust registers after it
+        elif insn.get_canon_feature() & ida_idp.CF_CALL != 0:
+            return None
+        return False
+
     def visit_expr(self, e: ida_hexrays.cexpr_t) -> int:
         """
         Iterate all objects in decompiler and correct the size of strings
@@ -158,11 +173,7 @@ class FunctionStringVisitor(ida_hexrays.ctree_visitor_t):
 
             # we found the parent instruction
             suspected_string_ref_ea = e.ea
-
-            # if the suspected ea has no drefs we can't assume it is not referencing a string
-            string_ref = ida_xref.get_first_dref_from(suspected_string_ref_ea)
-            if string_ref == BADADDR:
-                return 0
+            string_size = 0
 
             # get the string referenced by the instruction
             insn = ida_ua.insn_t()
@@ -173,17 +184,31 @@ class FunctionStringVisitor(ida_hexrays.ctree_visitor_t):
             )
 
             # get the register that references the string
-            ptr_reg = insn.Op1.reg
-            reg_name = ida_idp.get_reg_name(ptr_reg, data_sizes_map[insn.Op1.dtype])
+            reg_name = ida_idp.get_reg_name(
+                insn.Op1.reg, ida_ua.get_dtype_size(ida_ua.dt_qword)
+            )
 
-            # if the pointer is in the last register it can't be a string because of how go strings work
-            if reg_name not in go_fast_convention[:-1]:
+            # object referenced not by a param passing register, we can't know its size
+            if reg_name not in go_fast_convention:
                 return 0
 
-            # get the next reg in the fastcall, the next register where the string size will be stored
-            size_reg = ida_idp.str2reg(
-                go_fast_convention[go_fast_convention.index(reg_name) + 1]
-            )
+            string_ref = ida_xref.get_first_dref_from(suspected_string_ref_ea)
+            if string_ref == BADADDR:
+                # get the next reg in the fastcall, the next register where the string size will be stored
+                size_reg = ida_idp.str2reg(reg_name)
+                result = self.instruction_stores_valid_size(insn, size_reg)
+                if not result:
+                    return 0
+                lookup_reg = ida_idp.str2reg(
+                    go_fast_convention[go_fast_convention.index(reg_name) - 1]
+                )
+                string_size = insn.Op2.value
+                check_reg = self.instruction_stores_valid_obj
+            else:
+                lookup_reg = ida_idp.str2reg(
+                    go_fast_convention[go_fast_convention.index(reg_name) + 1]
+                )
+                check_reg = self.instruction_stores_valid_size
 
             found = False
             while not found:
@@ -192,7 +217,7 @@ class FunctionStringVisitor(ida_hexrays.ctree_visitor_t):
                 if next_insn_ea > self.func.end_ea:
                     break
                 else:
-                    result = self.instruction_stores_valid_size(insn, size_reg)
+                    result = check_reg(insn, lookup_reg)
                     if result is None:
                         break
                     else:
@@ -207,18 +232,24 @@ class FunctionStringVisitor(ida_hexrays.ctree_visitor_t):
                 if prev_insn < self.func.start_ea or prev_insn == BADADDR:
                     return 0
                 else:
-                    result = self.instruction_stores_valid_size(insn, size_reg)
+                    result = check_reg(insn, lookup_reg)
                     if result is None:
                         return 0
                     else:
                         found = result
 
-            # if the Op2 of the instruction is referencing an address it means it is not the constant length we are looking for
-            if insn.Op2.addr != 0:
-                return 0
+            if string_ref == BADADDR:
+                suspected_string_ref_ea = insn.ea
+                string_ref = ida_xref.get_first_dref_from(suspected_string_ref_ea)
+            else:
+                # if the Op2 of the instruction is referencing an address it means it is not the constant length we are looking for
+                if insn.Op2.addr != 0:
+                    return 0
+                string_size = insn.Op2.value
 
             # if we can't extract the string then we have a problem
-            self.define_string(string_ref, insn.Op2.value)
+            self.define_string(string_ref, string_size)
+
         return 0
 
 
@@ -236,7 +267,7 @@ class CallAnalysisHooks(ida_hexrays.Hexrays_Hooks):
         )
     )
 
-    def __init__(self, node: ida_netnode.netnode):
+    def __init__(self, node: ida_netnode.netnode) -> None:
         super().__init__()
         self.marked_eas_set = set()
         self.marked_eas_list = list()
@@ -254,7 +285,7 @@ class CallAnalysisHooks(ida_hexrays.Hexrays_Hooks):
 
         self.known_functions = known_functions
 
-    def save_eas(self):
+    def save_eas(self) -> None:
         self.node.setblob(
             json.dumps(self.marked_eas_list).encode("ascii"),
             self.node_index,
@@ -273,31 +304,31 @@ class CallAnalysisHooks(ida_hexrays.Hexrays_Hooks):
         # save the current information
         self.save_eas()
 
-        # check if the prototype of the function is already known by ida
-        if ida_nalt.get_aflags(callee_ea) & ida_nalt.AFL_USERTI:
-            tinfo = ida_typeinf.tinfo_t()
-            ida_hexrays.get_type(callee_ea, tinfo, ida_hexrays.GUESSED_FUNC)
-            call = GoCall(mba, callee_ea, tinfo)
-            func_declaration = call.get_decl_string()
+        if ida_name.get_name(callee_ea) == "runtime.morestack_noctxt":
+            func_declaration = "void func();"
 
         # if the name of the function is runtime.concatstring{number} we know its prototype
         elif concat_string_number.match(ida_funcs.get_func_name(callee_ea)):
 
             string_count = int(ida_funcs.get_func_name(callee_ea)[-1:])
 
-            string_tinfo = ida_typeinf.tinfo_t()
-            ida_typeinf.parse_decl(string_tinfo, None, "string x;", 0)
+            string_concat_declaration = f"string (*)(void * tmpbuf, {', '.join([f'string a{d}' for d in range(string_count)])});"
 
-            tmpbuf_tinfo = ida_typeinf.tinfo_t()
-            ida_typeinf.parse_decl(tmpbuf_tinfo, None, "void *x;", 0)
+            string_concat_tinfo = ida_typeinf.tinfo_t()
+            ida_typeinf.parse_decl(
+                string_concat_tinfo, None, string_concat_declaration, 0
+            )
 
             # calculate calling convention by the string concatenation count
-            call = GoCall(mba, callee_ea)
-            call.add_arg(tmpbuf_tinfo)
-            for _ in range(string_count):
-                call.add_arg(string_tinfo)
-            call.add_ret(string_tinfo)
-            func_declaration = call.get_decl_string()
+            func_declaration = GoCall(
+                mba, callee_ea, string_concat_tinfo
+            ).get_decl_string()
+
+        # check if the prototype of the function is already known by ida
+        elif ida_nalt.get_aflags(callee_ea) & ida_nalt.AFL_USERTI:
+            tinfo = ida_typeinf.tinfo_t()
+            ida_hexrays.get_type(callee_ea, tinfo, ida_hexrays.GUESSED_FUNC)
+            func_declaration = GoCall(mba, callee_ea, tinfo).get_decl_string()
 
         # we can only guess the calling convention manually by the assembly
         else:
@@ -336,8 +367,9 @@ class CallAnalysisHooks(ida_hexrays.Hexrays_Hooks):
             while insn.get_canon_feature() & ida_idp.CF_CALL == 0:
                 # extract stored register into func declaration
                 if insn.Op1.type == ida_ua.o_displ and insn.Op1.addr != 0:
+                    op2_dtype_size = ida_ua.get_dtype_size(insn.Op2.dtype)
                     param_regs_list.append(
-                        f"__int{data_sizes_map[insn.Op2.dtype]*BYTE_SIZE}@<{ida_idp.get_reg_name(insn.Op2.reg, data_sizes_map[insn.Op2.dtype])}>"
+                        f"__int{op2_dtype_size * BYTE_SIZE}@<{ida_idp.get_reg_name(insn.Op2.reg, op2_dtype_size)}>"
                     )
                 current_insn_ea = current_insn_ea + ida_ua.decode_insn(
                     insn, current_insn_ea
@@ -353,7 +385,7 @@ class CallAnalysisHooks(ida_hexrays.Hexrays_Hooks):
         ida_typeinf.apply_tinfo(callee_ea, call_info, ida_typeinf.TINFO_DEFINITE)
 
     # fix the current call information
-    def maturity(self, cfunc: ida_hexrays.cfunc_t, new_maturity):
+    def maturity(self, cfunc: ida_hexrays.cfunc_t, new_maturity) -> int:
         if new_maturity == ida_hexrays.CMAT_FINAL:
             self.fix_call_by_ea(cfunc.mba, cfunc.entry_ea)
             # fix strings in decompiler
@@ -386,11 +418,11 @@ class CallAnalysisHooks(ida_hexrays.Hexrays_Hooks):
 
 class R14Optimizer(ida_hexrays.optinsn_t):
 
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__()
         self.r14_code = ida_hexrays.reg2mreg(ida_idp.str2reg("r14"))
 
-    def func(self, blk: ida_hexrays.mblock_t, ins, optflags):
+    def func(self, blk: ida_hexrays.mblock_t, ins, optflags) -> int:
         """
         Find uses of r14 in the microcode, replace them with calls to an helper named CurrentGoroutine
         This helper is meant to mimic how ida converts fs/gs access to the NtCurrentTeb helper
@@ -467,7 +499,7 @@ class GoAnalyzer(ida_idaapi.plugin_t):
     wanted_name = "GoAnalyzer"
     GOANALYZER_NODE = "GoAnalyzerNode"
 
-    def init(self):
+    def init(self) -> int:
         # do it by finding the last reference to the UNCOMMON_TYPE_METHOD type
         # fix_strings()
         self.enabled = False
@@ -522,7 +554,7 @@ class GoAnalyzer(ida_idaapi.plugin_t):
         self.run(None)
         return ida_idaapi.PLUGIN_KEEP
 
-    def run(self, _):
+    def run(self, _) -> int:
         """Install all the hooks we need and do our initialization"""
         if not self.initialized:
             # initialize our netnode, we don't want to recompile everything all the time
@@ -540,6 +572,7 @@ class GoAnalyzer(ida_idaapi.plugin_t):
             ):
                 ida_struct.add_struc(BADADDR, "runtime_g")
 
+            # create the string struct if it doesn't already exist
             if ida_typeinf.get_named_type(None, "string", ida_typeinf.NTF_TYPE) is None:
                 string_struc = ida_struct.add_struc(BADADDR, "string")
                 ida_struct.add_struc_member(
@@ -585,9 +618,9 @@ class GoAnalyzer(ida_idaapi.plugin_t):
             print("GoAnalyzer Disabled")
         return 0
 
-    def term(self):
+    def term(self) -> None:
         pass
 
 
-def PLUGIN_ENTRY():
+def PLUGIN_ENTRY() -> GoAnalyzer:
     return GoAnalyzer()
