@@ -5,12 +5,15 @@ Go fastcall analysis for ida decompiler
 Put the GoAnalyzer.py and DecompilerLib dir in your plugins directory
 
 ## Motivation
-Currently, IDA Pro can't detect new [Go internal abi](https://github.com/golang/go/blob/master/src/cmd/compile/abi-internal.md)
+Currently, IDA Pro doesn't detect the new [Go internal abi](https://github.com/golang/go/blob/master/src/cmd/compile/abi-internal.md)
 which is the new way of calling functions in go since go 1.17 good enough
 
 This new calling convention uses registers instead of the stack to pass parameters
-However ida detects the convention as __golang convention which passes parameters on the stack,  
+However IDA detects the convention as __golang convention which passes parameters on the stack,  
 which makes the decompilation look confusing
+
+
+In newer versions of IDA the __golang is defined in the registers we take this into consideration, and use this new feature
 
 ## Features
 ### Main features

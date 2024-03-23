@@ -8,7 +8,7 @@ import ida_typeinf
 from idc import BADADDR
 from ida_kernwin import get_kernel_version
 
-from DecompilerLib.utils import BYTE_SIZE, go_fast_convention
+from DecompilerLib.utils import BYTE_SIZE, go_fast_convention, GO_SUPPORTED
 
 
 def get_sized_register_by_name(reg_name: str, reg_size: int) -> str:
@@ -114,14 +114,14 @@ class GoCall:
     and create the correct calling convention
     """
 
-    correct_cc = (
-        ida_typeinf.CM_CC_MANUAL
-        if float(get_kernel_version()) <= 7.7
-        else ida_typeinf.CM_CC_GOLANG
-    )
+    correct_cc = ida_typeinf.CM_CC_GOLANG if GO_SUPPORTED else ida_typeinf.CM_CC_MANUAL
 
     def __init__(
-        self, mba: ida_hexrays.mba_t, callee_ea: int, tinfo: ida_typeinf.tinfo_t = None
+        self,
+        mba: ida_hexrays.mba_t,
+        callee_ea: int,
+        tinfo: ida_typeinf.tinfo_t = None,
+        detected_go: bool = True
     ) -> None:
         self.reg_count = 0
         self.current_stack = 0
@@ -136,6 +136,7 @@ class GoCall:
         self.callinfo.return_regs = ida_hexrays.mlist_t()
         self.callinfo.callee = callee_ea
         self.mba = mba
+        self.detected_go = detected_go
 
         self.ret_type = "void *"
         self.ret_loc = "rax"
@@ -150,7 +151,9 @@ class GoCall:
 
     def get_decl_string(self) -> str:
         """Format the function prototype from our known args and return values"""
-        if self.ret_type != "void":
+        if self.detected_go:
+            return f"{self.ret_type} __golang func({','.join(self.__args)});"
+        elif self.ret_type != "void":
             return f"{self.ret_type} __usercall func@<{self.ret_loc}>({','.join(self.__args)});"
         else:
             return f"void __usercall func({','.join(self.__args)});"
@@ -272,7 +275,10 @@ class GoCall:
         self.callinfo.solid_args += 1
 
         # finalize the argument string
-        self.__args.append(f"{tinfo_copy.dstr()}@<{current_type_reg_split}>")
+        arg = tinfo_copy.dstr()
+        if not self.detected_go:
+            arg += f"@<{current_type_reg_split}>"
+        self.__args.append(arg)
 
     def add_ret(self, tinfo: ida_typeinf.tinfo_t) -> None:
         """

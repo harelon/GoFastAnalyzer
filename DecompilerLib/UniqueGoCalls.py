@@ -31,11 +31,7 @@ class RtypeCall:
 
     def __init__(self, definition: str) -> None:
         self.definition = definition
-        self.initialized = False
         self.type_based_definition = re.compile("((.*?){type}(.*?))\\s")
-
-    def init(self) -> None:
-        self.rtype_reg = ida_idp.str2reg(go_fast_convention[0])
 
     def get_referenced_rtype(self, ea: int) -> tuple[str, int]:
         """Returns the name of the rtype that is initialized before this ea"""
@@ -45,26 +41,25 @@ class RtypeCall:
         insn = ida_ua.insn_t()
         prev_address = ida_ua.decode_prev_insn(insn, ea)
         while prev_address:
+            if insn.get_canon_feature() & ida_idp.CF_CALL != 0:
+                break
             if (
-                insn.Op1.reg == self.rtype_reg
-                and insn.itype != ida_allins.NN_nop
+                insn.itype != ida_allins.NN_nop
                 and insn.itype != ida_allins.NN_fnop
                 and not (
                     insn.itype == ida_allins.NN_xchg and insn.Op1.reg == insn.Op2.reg
                 )
+                and insn.Op2.addr != 0
             ):
-                if insn.Op2.addr != 0:
-                    out_name = ida_name.get_name(insn.Op2.addr)
-                    if out_name.startswith(self.type_header):
-                        wanted_outtype = out_name[len(self.type_header) :]
-                break
+                out_name = ida_name.get_name(insn.Op2.addr)
+                if out_name.startswith(self.type_header):
+                    wanted_outtype = out_name[len(self.type_header) :]
+                    break
+
             prev_address = ida_ua.decode_prev_insn(insn, prev_address)
         return wanted_outtype, insn.Op2.addr
 
     def fill_vars(self, ea: int) -> dict[str, str]:
-        if not self.initialized:
-            self.init()
-            self.initialized = True
 
         starting_dict = {"{type}": self.get_referenced_rtype(ea)[0]}
 
@@ -137,7 +132,7 @@ class RtypeCall:
             ida_typeinf.parse_decl(tinfo, None, actual_definition, ida_typeinf.PT_SIL)
             is None
         ):
-            print(f'Error parsing -> "{actual_definition}"')
+            print(f'Error parsing -> "{actual_definition}" at {hex(call_ea)}')
             return
 
         callinfo = GoCall(mba, callee_ea, tinfo)
@@ -157,7 +152,6 @@ class MapCall(RtypeCall):
         self.search_pattern = re.compile("\[(.*?)\](.*)$")
 
     def init(self) -> None:
-        super().init()
         # if we don't have type definitions we can't parse the rtype for the mapcall
         self.rtype_tinfo = ida_typeinf.tinfo_t()
         if (
@@ -238,6 +232,9 @@ class MapCall(RtypeCall):
 
 
 known_functions: dict[str, RtypeCall] = {
+    "runtime.typedmemmove": RtypeCall(
+        "{type} * typedmemmove(RTYPE * _typ, {type} *, {type} *);"
+    ),
     "runtime.newobject": RtypeCall("{type} * newobject(RTYPE * _typ);"),
     "runtime.makeslice": RtypeCall(
         "_slice_{type} * makeslice(RTYPE * _typ, __int32, __int32);"
@@ -249,7 +246,7 @@ known_functions: dict[str, RtypeCall] = {
         "_slice_{type} * makeslicecopy(RTYPE * _typ, int, int, {type} *);"
     ),
     "runtime.growslice": RtypeCall(
-        "_slice_{type} growslice(RTYPE * _typ, _slice_{type}, int);"
+        "_slice_{type} growslice(_slice_{type}, int, RTYPE * _typ);"
     ),
     "runtime.convT": RtypeCall(
         "{type} * convT(RTYPE * _typ, {type} *);",
