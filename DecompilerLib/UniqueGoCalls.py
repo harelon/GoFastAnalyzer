@@ -5,6 +5,7 @@ import ida_idp
 import ida_enum
 import ida_name
 import ida_bytes
+import ida_funcs
 import ida_allins
 import ida_struct
 import ida_hexrays
@@ -13,7 +14,7 @@ from idc import BADADDR
 
 
 from DecompilerLib.GoCallinfo import GoCall
-from DecompilerLib.utils import BYTE_SIZE, go_fast_convention
+from DecompilerLib.utils import BYTE_SIZE
 
 
 def translate(string: str, translation_dict: dict) -> str:
@@ -32,15 +33,19 @@ class RtypeCall:
     def __init__(self, definition: str) -> None:
         self.definition = definition
         self.type_based_definition = re.compile("((.*?){type}(.*?))\\s")
+        self.initialized = False
+
+    def init(self) -> None:
+        self.initialized = True
 
     def get_referenced_rtype(self, ea: int) -> tuple[str, int]:
         """Returns the name of the rtype that is initialized before this ea"""
         wanted_outtype = "char *"
-
+        func = ida_funcs.get_func(ea)
         # get the name of the type initialized here
         insn = ida_ua.insn_t()
         prev_address = ida_ua.decode_prev_insn(insn, ea)
-        while prev_address:
+        while prev_address < func.start_ea:
             if insn.get_canon_feature() & ida_idp.CF_CALL != 0:
                 break
             if (
@@ -54,14 +59,17 @@ class RtypeCall:
                 out_name = ida_name.get_name(insn.Op2.addr)
                 if out_name.startswith(self.type_header):
                     wanted_outtype = out_name[len(self.type_header) :]
-                    break
+                    return wanted_outtype, insn.Op2.addr
 
             prev_address = ida_ua.decode_prev_insn(insn, prev_address)
-        return wanted_outtype, insn.Op2.addr
+        return None
 
     def fill_vars(self, ea: int) -> dict[str, str]:
+        result = self.get_referenced_rtype(ea)
+        if result is None:
+            return None
 
-        starting_dict = {"{type}": self.get_referenced_rtype(ea)[0]}
+        starting_dict = {"{type}": result[0]}
 
         typedef = self.type_based_definition.search(self.definition)
 
@@ -152,6 +160,7 @@ class MapCall(RtypeCall):
         self.search_pattern = re.compile("\[(.*?)\](.*)$")
 
     def init(self) -> None:
+        super().init()
         # if we don't have type definitions we can't parse the rtype for the mapcall
         self.rtype_tinfo = ida_typeinf.tinfo_t()
         if (
@@ -198,9 +207,11 @@ class MapCall(RtypeCall):
         )
 
     def fill_vars(self, ea: int) -> dict[str, str] | None:
+        if not self.initialized:
+            self.init()
 
         starting_dict = super().fill_vars(ea)
-        if self.disabled:
+        if starting_dict is None or self.disabled:
             return
 
         _, addr = self.get_referenced_rtype(ea)

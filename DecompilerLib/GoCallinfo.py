@@ -6,7 +6,6 @@ import ida_hexrays
 import ida_typeinf
 
 from idc import BADADDR
-from ida_kernwin import get_kernel_version
 
 from DecompilerLib.utils import BYTE_SIZE, go_fast_convention, GO_SUPPORTED
 
@@ -121,7 +120,7 @@ class GoCall:
         mba: ida_hexrays.mba_t,
         callee_ea: int,
         tinfo: ida_typeinf.tinfo_t = None,
-        detected_go: bool = True
+        detected_go: bool = True,
     ) -> None:
         self.reg_count = 0
         self.current_stack = 0

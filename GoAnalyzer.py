@@ -25,7 +25,12 @@ from idc import BADADDR
 
 from DecompilerLib.UniqueGoCalls import known_functions
 from DecompilerLib.GoCallinfo import GoCall, get_sized_register_by_name
-from DecompilerLib.utils import BYTE_SIZE, go_fast_convention, GO_SUPPORTED, runtime_morestack_noctxt
+from DecompilerLib.utils import (
+    BYTE_SIZE,
+    go_fast_convention,
+    GO_SUPPORTED,
+    runtime_morestack_functions,
+)
 
 go_version_regex = re.compile("go\\d\\.(\\d{1,2})(\\.\\d{1,2})?$")
 concat_string_number = re.compile("runtime\\.concatstring\\d")
@@ -204,8 +209,12 @@ class FunctionStringVisitor(ida_hexrays.ctree_visitor_t):
             # save the offset of the member to be able to restore our strings
             if member.name == "ptr":
                 obj_ea = None
-                skip_ref_y = skip_cast_y.x if skip_cast_y.op == ida_hexrays.cot_ref else skip_cast_y
-                
+                skip_ref_y = (
+                    skip_cast_y.x
+                    if skip_cast_y.op == ida_hexrays.cot_ref
+                    else skip_cast_y
+                )
+
                 if skip_ref_y.op == ida_hexrays.cot_idx:
                     e = skip_ref_y
                     while e.ea == BADADDR:
@@ -223,7 +232,11 @@ class FunctionStringVisitor(ida_hexrays.ctree_visitor_t):
                     # if we found the size no need to search for it again
                     while result == BADADDR:
                         prev_insn = ida_ua.decode_prev_insn(insn, prev_insn)
-                        if prev_insn < self.func.start_ea or prev_insn == BADADDR or insn.get_canon_feature() & ida_idp.CF_CALL != 0:
+                        if (
+                            prev_insn < self.func.start_ea
+                            or prev_insn == BADADDR
+                            or insn.get_canon_feature() & ida_idp.CF_CALL != 0
+                        ):
                             should_continue = True
                             break
                         else:
@@ -233,10 +246,10 @@ class FunctionStringVisitor(ida_hexrays.ctree_visitor_t):
                         continue
 
                     obj_ea = result
-                
+
                 elif skip_ref_y.op == ida_hexrays.cot_obj:
                     obj_ea = skip_ref_y.obj_ea
-                
+
                 if obj_ea:
                     self.string_assignments[string_key].pointer = obj_ea
 
@@ -400,8 +413,8 @@ class CallAnalysisHooks(ida_hexrays.Hexrays_Hooks):
             self.node_index,
             self.tag_name,
         )
-    
-    def guess_func_return_type(self, ea) -> str:
+
+    def guess_func_return_type(self, ea: int) -> str:
         used_reg = -1
         func = ida_funcs.get_func(ea)
         flow_chart = ida_gdl.qflow_chart_t("", func, func.start_ea, func.end_ea, 0)
@@ -410,7 +423,7 @@ class CallAnalysisHooks(ida_hexrays.Hexrays_Hooks):
             insn = ida_ua.insn_t()
             funcs = set()
             for i in range(flow_chart.node_qty()):
-                
+
                 # iterate blocks that return from the function they might contain the result registers
                 if flow_chart.is_ret_block(i):
 
@@ -418,16 +431,27 @@ class CallAnalysisHooks(ida_hexrays.Hexrays_Hooks):
                     current_ea = flow_chart[i].end_ea
                     if ida_xref.get_first_cref_from(current_ea) == func.start_ea:
                         continue
-                        
+
                     # iterate from the return backwards until we find a call which spoils all registers
-                    while current_ea > flow_chart[i].start_ea and not insn.get_canon_feature() & ida_idp.CF_CALL:
+                    while (
+                        current_ea > flow_chart[i].start_ea
+                        and not insn.get_canon_feature() & ida_idp.CF_CALL
+                    ):
                         current_ea = ida_ua.decode_prev_insn(insn, current_ea)
-                        
+
                         # if the register we currently change is a return register we check it
-                        if insn.Op1.type == ida_ua.o_reg and insn.Op1.reg in self.valid_reg_ids:
+                        if (
+                            insn.Op1.type == ida_ua.o_reg
+                            and insn.Op1.reg in self.valid_reg_ids
+                        ):
                             # each time we take the max register which is changed, we can assume the function
                             # wouldn't change it if it wasn't part of its result
-                            used_reg = max(used_reg, go_fast_convention.index(ida_idp.get_reg_name(insn.Op1.reg, 8)))
+                            used_reg = max(
+                                used_reg,
+                                go_fast_convention.index(
+                                    ida_idp.get_reg_name(insn.Op1.reg, 8)
+                                ),
+                            )
 
                     # gather all call instructions which are called before returning from the function
                     if insn.get_canon_feature() & ida_idp.CF_CALL:
@@ -435,7 +459,7 @@ class CallAnalysisHooks(ida_hexrays.Hexrays_Hooks):
 
             # the function might return the result of its last called function
             if used_reg == -1:
-                
+
                 # check our gathered calls for their prototypes
                 for ea in funcs:
                     # get the callee ea
@@ -451,13 +475,17 @@ class CallAnalysisHooks(ida_hexrays.Hexrays_Hooks):
                     # the called function is already defined, take its return type
                     if ida_nalt.get_aflags(xrefed_func) & ida_nalt.AFL_USERTI:
                         tinfo = ida_typeinf.tinfo_t()
-                        ida_hexrays.get_type(xrefed_func, tinfo, ida_hexrays.GUESSED_FUNC)
+                        ida_hexrays.get_type(
+                            xrefed_func, tinfo, ida_hexrays.GUESSED_FUNC
+                        )
                         func_details = ida_typeinf.func_type_data_t()
                         tinfo.get_func_details(func_details)
                         return func_details.rettype.dstr()
-                    # recurse the inner function and try to find its 
+                    # recurse the inner function and try to find its return registers
                     else:
-                        flow_chart = ida_gdl.qflow_chart_t("", func, func.start_ea, func.end_ea, 0)
+                        flow_chart = ida_gdl.qflow_chart_t(
+                            "", func, func.start_ea, func.end_ea, 0
+                        )
                         should_continue = True
                         break
 
@@ -468,13 +496,15 @@ class CallAnalysisHooks(ida_hexrays.Hexrays_Hooks):
         # we couldn't find any registers used in the return blocks
         if used_reg == -1:
             return "void"
+        elif used_reg == 0:
+            return "void *"
         else:
             # sometimes functions' parents create their return type for them
             struc_name = f"retval_{func.start_ea:X}"
             if ida_struct.get_struc_id(struc_name) == BADADDR:
                 # create the result struct if it doesn't exist
                 retval_struc = ida_struct.add_struc(BADADDR, struc_name)
-                for i in range(used_reg+1):
+                for i in range(used_reg + 1):
                     ida_struct.add_struc_member(
                         ida_struct.get_struc(retval_struc),
                         f"part_{i}",
@@ -485,8 +515,7 @@ class CallAnalysisHooks(ida_hexrays.Hexrays_Hooks):
                     )
             return struc_name
 
-
-    def fix_call_by_ea(self, mba, callee_ea) -> None:
+    def fix_call_by_ea(self, mba: ida_hexrays.mba_t, callee_ea: int) -> None:
         # check if we already fixed the call
         if callee_ea in self.marked_eas_set:
             return
@@ -498,7 +527,7 @@ class CallAnalysisHooks(ida_hexrays.Hexrays_Hooks):
         # save the current information
         self.save_eas()
 
-        if ida_name.get_name(callee_ea) == runtime_morestack_noctxt:
+        if ida_name.get_name(callee_ea) in runtime_morestack_functions:
             func_declaration = "void func();"
 
         # if the name of the function is runtime.concatstring{number} we know its prototype
@@ -557,7 +586,7 @@ class CallAnalysisHooks(ida_hexrays.Hexrays_Hooks):
                 xrefed_func = ida_xref.get_first_cref_from(insn.ea)
                 while func.start_ea <= xrefed_func <= func.end_ea:
                     xrefed_func = ida_xref.get_next_cref_from(insn.ea, xrefed_func)
-                if ida_name.get_name(xrefed_func) != runtime_morestack_noctxt:
+                if ida_name.get_name(xrefed_func) not in runtime_morestack_functions:
                     return
 
             func_declaration = ""
@@ -585,7 +614,9 @@ class CallAnalysisHooks(ida_hexrays.Hexrays_Hooks):
                     call_ret = ida_typeinf.tinfo_t()
                     ida_typeinf.parse_decl(call_ret, None, f"{func_declaration};", 0)
                     call.add_ret(call_ret)
-                    func_declaration = f"{call.ret_type} __usercall func@<{call.ret_loc}>"
+                    func_declaration = (
+                        f"{call.ret_type} __usercall func@<{call.ret_loc}>"
+                    )
                 else:
                     func_declaration = f"void __usercall func"
             else:
@@ -594,12 +625,11 @@ class CallAnalysisHooks(ida_hexrays.Hexrays_Hooks):
 
         # set function typeinfo
         call_info = ida_typeinf.tinfo_t()
-        print(f"{func_declaration} at {hex(callee_ea)}")
         ida_typeinf.parse_decl(call_info, None, func_declaration, 0)
         ida_typeinf.apply_tinfo(callee_ea, call_info, ida_typeinf.TINFO_DEFINITE)
 
     # fix the current call information
-    def maturity(self, cfunc: ida_hexrays.cfunc_t, new_maturity) -> int:
+    def maturity(self, cfunc: ida_hexrays.cfunc_t, new_maturity: int) -> int:
         if new_maturity == ida_hexrays.CMAT_FINAL:
             self.fix_call_by_ea(cfunc.mba, cfunc.entry_ea)
             # fix strings in decompiler
@@ -639,7 +669,9 @@ class R14Optimizer(ida_hexrays.optinsn_t):
         super().__init__()
         self.r14_code = ida_hexrays.reg2mreg(ida_idp.str2reg("r14"))
 
-    def func(self, blk: ida_hexrays.mblock_t, ins, optflags) -> int:
+    def func(
+        self, blk: ida_hexrays.mblock_t, ins: ida_hexrays.minsn_t, optflags: int
+    ) -> int:
         """
         Find uses of r14 in the microcode, replace them with calls to an helper named CurrentGoroutine
         This helper is meant to mimic how ida converts fs/gs access to the NtCurrentTeb helper
@@ -766,15 +798,6 @@ class GoAnalyzer(ida_idaapi.plugin_t):
         if not match or int(match.group(1)) < MINIMAL_REGISTER_ABI_GO_VERSION:
             return ida_idaapi.PLUGIN_SKIP
 
-        self.detected_go = False
-
-        if (
-            GO_SUPPORTED
-            and ida_idaapi.get_inf_structure().cc.cm & ida_typeinf.CM_CC_MASK
-            == ida_typeinf.CM_CC_GOLANG
-        ):
-            self.detected_go = True
-
         print(f"Detected {supposed_version_string}")
         self.run(None)
         return ida_idaapi.PLUGIN_KEEP
@@ -782,6 +805,14 @@ class GoAnalyzer(ida_idaapi.plugin_t):
     def run(self, _) -> int:
         """Install all the hooks we need and do our initialization"""
         if not self.initialized:
+            self.detected_go = False
+            if (
+                GO_SUPPORTED
+                and ida_idaapi.get_inf_structure().cc.cm & ida_typeinf.CM_CC_MASK
+                == ida_typeinf.CM_CC_GOLANG
+            ):
+                self.detected_go = True
+
             # initialize our netnode, we don't want to recompile everything all the time
             self.node = ida_netnode.netnode()
             self.node.create(GoAnalyzer.GOANALYZER_NODE)
