@@ -665,9 +665,10 @@ class CallAnalysisHooks(ida_hexrays.Hexrays_Hooks):
 
 class R14Optimizer(ida_hexrays.optinsn_t):
 
-    def __init__(self) -> None:
+    def __init__(self, runtime_g: ida_typeinf.tinfo_t) -> None:
         super().__init__()
         self.r14_code = ida_hexrays.reg2mreg(ida_idp.str2reg("r14"))
+        self.runtime_g = runtime_g
 
     def func(
         self, blk: ida_hexrays.mblock_t, ins: ida_hexrays.minsn_t, optflags: int
@@ -698,10 +699,6 @@ class R14Optimizer(ida_hexrays.optinsn_t):
                 callinfo_mop = ida_hexrays.mop_t()
                 callinfo = ida_hexrays.mcallinfo_t()
 
-                # set the return type to be the runtime_g (the goroutine struct)
-                return_type = ida_typeinf.tinfo_t()
-                ida_typeinf.parse_decl(return_type, None, "runtime_g * x;", 0)
-
                 # set function return regs
                 regs_vec = ida_hexrays.mopvec_t()
                 return_mop = ida_hexrays.mop_t()
@@ -721,7 +718,8 @@ class R14Optimizer(ida_hexrays.optinsn_t):
                 spoiled_list.add(current_insn.d.r, 8)
 
                 # set all of the callinfo information
-                callinfo.return_type = return_type
+                # set the return type to be the runtime_g (the goroutine struct)
+                callinfo.return_type = self.runtime_g.copy()
                 callinfo.retregs = regs_vec
                 callinfo.return_regs = regs_list
                 callinfo.spoiled = spoiled_list
@@ -741,6 +739,57 @@ class R14Optimizer(ida_hexrays.optinsn_t):
             current_insn = current_insn.next
 
         return 0
+
+
+def check_tinfo_zeroes(tinfo: ida_typeinf.tinfo_t) -> bool:
+    for i in range(tinfo.get_udt_nmembers()):
+        # find member
+        member = ida_typeinf.udt_member_t()
+        member.offset = i
+        tinfo.find_udt_member(member, ida_typeinf.STRMEM_INDEX)
+
+        # check zero_sized_members and fill them recursively
+        if member.size == 0 or check_tinfo_zeroes(member.type):
+            return True
+    return False
+
+
+def remove_tinfo_zeroes(tinfo: ida_typeinf.tinfo_t) -> bool:
+    """
+    Create a new structure without zero size members in it from the type info we receive
+    """
+
+    sid = ida_struct.add_struc(BADADDR, f"{tinfo.dstr()}_nozeroes")
+    struc = ida_struct.get_struc(sid)
+
+    for i in range(tinfo.get_udt_nmembers()):
+        # find member
+        member = ida_typeinf.udt_member_t()
+        member.offset = i
+        tinfo.find_udt_member(member, ida_typeinf.STRMEM_INDEX)
+
+        # check zero_sized members and fill them recursively
+        if member.size == 0:
+            continue
+
+        if check_tinfo_zeroes(member.type):
+            remove_tinfo_zeroes(member.type)
+            member_type = ida_typeinf.tinfo_t()
+            ida_typeinf.parse_decl(
+                member_type, None, f"{member.type.dstr()}_nozeroes;", ida_typeinf.PT_SIL
+            )
+        # member has no zero sized members we can use it as is
+        else:
+            member_type = member.type
+
+        # convert tinfo information to struct information
+        name = ida_name.validate_name(member.name, ida_name.SN_NOCHECK)
+        member_size = member.size // BYTE_SIZE
+        member_offset = member.offset // BYTE_SIZE
+
+        ida_struct.add_struc_member(struc, name, member_offset, 0, None, member_size)
+        mem = ida_struct.get_member(struc, member_offset)
+        ida_struct.set_member_tinfo(struc, mem, member_offset, member_type, 0)
 
 
 class GoAnalyzer(ida_idaapi.plugin_t):
@@ -819,14 +868,23 @@ class GoAnalyzer(ida_idaapi.plugin_t):
 
             self.hooks = CallAnalysisHooks(self.node, self.detected_go)
             self.filter = Xmm15Optimizer()
-            self.optimizer = R14Optimizer()
-
+            self.runtime_g = ida_typeinf.tinfo_t()
             # create the goroutine struct if it doesn't already exist
             if (
                 ida_typeinf.get_named_type(None, "runtime_g", ida_typeinf.NTF_TYPE)
                 is None
             ):
                 ida_struct.add_struc(BADADDR, "runtime_g")
+                ida_typeinf.parse_decl(
+                    self.runtime_g, None, "runtime_g;", ida_typeinf.PT_SIL
+                )
+            else:
+                tinfo = ida_typeinf.tinfo_t()
+                ida_typeinf.parse_decl(tinfo, None, "runtime_g;", ida_typeinf.PT_SIL)
+                remove_tinfo_zeroes(tinfo)
+                ida_typeinf.parse_decl(
+                    self.runtime_g, None, "runtime_g_nozeroes;", ida_typeinf.PT_SIL
+                )
 
             # create the string struct if it doesn't already exist
             if ida_typeinf.get_named_type(None, "string", ida_typeinf.NTF_TYPE) is None:
@@ -848,6 +906,7 @@ class GoAnalyzer(ida_idaapi.plugin_t):
                     8,
                 )
 
+            self.optimizer = R14Optimizer(self.runtime_g)
             self.initialized = True
             print("GoAnalyzer Initialized")
 
