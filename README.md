@@ -2,7 +2,7 @@
 Go fastcall analysis for ida decompiler
 
 ## Installation
-Put the GoAnalyzer.py and DecompilerLib dir in your plugins directory
+Put the GoAnalyzer.py and GoAnalyzer dir in your plugins directory
 
 ## Motivation
 Currently, IDA Pro doesn't detect the new [Go internal abi](https://github.com/golang/go/blob/master/src/cmd/compile/abi-internal.md)

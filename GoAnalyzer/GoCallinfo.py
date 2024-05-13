@@ -7,7 +7,7 @@ import ida_typeinf
 
 from idc import BADADDR
 
-from DecompilerLib.utils import BYTE_SIZE, go_fast_convention, GO_SUPPORTED
+from GoAnalyzer.utils import BYTE_SIZE, go_fast_convention, go_calling_convention
 
 
 def get_sized_register_by_name(reg_name: str, reg_size: int) -> str:
@@ -85,10 +85,10 @@ class GoTypeAssigner:
         subtype_count = tinfo.get_udt_nmembers()
         # the type is atomic
         if subtype_count == -1 and (
-            tinfo.is_decl_bool() or tinfo.is_scalar() or tinfo.is_ptr()
+            tinfo.is_bool() or tinfo.is_scalar() or tinfo.is_ptr()
         ):
             self.arg_sizes.append(tinfo.get_size())
-        elif tinfo.is_decl_array():
+        elif tinfo.is_array():
             # arrays of 2 and more make the type passed on the stack
             if tinfo.get_array_nelems() > 1:
                 self.arg_sizes.clear()
@@ -113,8 +113,6 @@ class GoCall:
     and create the correct calling convention
     """
 
-    correct_cc = ida_typeinf.CM_CC_GOLANG if GO_SUPPORTED else ida_typeinf.CM_CC_MANUAL
-
     def __init__(
         self,
         mba: ida_hexrays.mba_t,
@@ -133,6 +131,7 @@ class GoCall:
 
         self.callinfo.spoiled = ida_hexrays.mlist_t()
         self.callinfo.return_regs = ida_hexrays.mlist_t()
+        self.callinfo.retregs = ida_hexrays.mopvec_t()
         self.callinfo.callee = callee_ea
         self.mba = mba
         self.detected_go = detected_go
@@ -145,7 +144,7 @@ class GoCall:
                 self.add_arg(tinfo.get_nth_arg(i))
             self.add_ret(tinfo.get_rettype())
 
-            self.callinfo.cc = self.correct_cc
+            self.callinfo.cc = go_calling_convention
             self.callinfo.flags |= ida_hexrays.FCI_EXPLOCS
 
     def get_decl_string(self) -> str:
@@ -261,6 +260,7 @@ class GoCall:
         if len(scattered) > 1:
             scif = ida_hexrays.scif_t(self.mba, tinfo_copy.copy())
             scif.consume_scattered(scattered)
+            current_mcall.argloc = scif
             current_mcall.create_from_scattered_vdloc(
                 self.mba, None, tinfo_copy.copy(), scif
             )
@@ -293,6 +293,10 @@ class GoCall:
         if len(scattered) == 1:
             arg = scattered[0]
             if arg.is_reg1():
+                current_mop = ida_hexrays.mop_t()
+                current_mop.make_reg(ida_hexrays.reg2mreg(arg.reg1()), arg.size)
+                self.callinfo.retregs.push_back(current_mop)
+
                 self.callinfo.return_regs.add(
                     ida_hexrays.reg2mreg(arg.reg1()), arg.size
                 )
@@ -302,6 +306,10 @@ class GoCall:
 
         if len(scattered) > 1:
             for item in scattered:
+                current_mop = ida_hexrays.mop_t()
+                current_mop.make_reg(ida_hexrays.reg2mreg(item.reg1()), item.size)
+                self.callinfo.retregs.push_back(current_mop)
+
                 self.callinfo.return_regs.add(
                     ida_hexrays.reg2mreg(item.reg1()), item.size
                 )

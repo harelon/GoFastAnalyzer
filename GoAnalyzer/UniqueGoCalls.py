@@ -13,8 +13,8 @@ import ida_typeinf
 from idc import BADADDR
 
 
-from DecompilerLib.GoCallinfo import GoCall
-from DecompilerLib.utils import BYTE_SIZE
+from GoAnalyzer.GoCallinfo import GoCall
+from GoAnalyzer.utils import BYTE_SIZE
 
 
 def translate(string: str, translation_dict: dict) -> str:
@@ -45,7 +45,7 @@ class RtypeCall:
         # get the name of the type initialized here
         insn = ida_ua.insn_t()
         prev_address = ida_ua.decode_prev_insn(insn, ea)
-        while prev_address < func.start_ea:
+        while prev_address > func.start_ea:
             if insn.get_canon_feature() & ida_idp.CF_CALL != 0:
                 break
             if (

@@ -23,13 +23,15 @@ import ida_segregs
 import ida_typeinf
 from idc import BADADDR
 
-from DecompilerLib.UniqueGoCalls import known_functions
-from DecompilerLib.GoCallinfo import GoCall, get_sized_register_by_name
-from DecompilerLib.utils import (
+from GoAnalyzer.UniqueGoCalls import known_functions
+from GoAnalyzer.GoCallinfo import GoCall, get_sized_register_by_name
+from GoAnalyzer.utils import (
     BYTE_SIZE,
     go_fast_convention,
     GO_SUPPORTED,
     runtime_morestack_functions,
+    remove_tinfo_zeroes,
+    go_calling_convention
 )
 
 go_version_regex = re.compile("go\\d\\.(\\d{1,2})(\\.\\d{1,2})?$")
@@ -276,10 +278,8 @@ class FunctionStringVisitor(ida_hexrays.ctree_visitor_t):
                 if item.op == ida_hexrays.cot_cast:
                     item = item.x
                 if item.op == ida_hexrays.cot_call:
-                    string_tinfo = ida_typeinf.tinfo_t()
-                    ida_typeinf.parse_decl(string_tinfo, None, "string x;", 0)
                     if (
-                        orig_item.formal_type.compare(string_tinfo) == 0
+                        orig_item.formal_type.compare(self.string_tinfo) == 0
                         and item.a[0].op == ida_hexrays.cot_num
                         and item.a[1].op == ida_hexrays.cot_obj
                     ):
@@ -653,14 +653,17 @@ class CallAnalysisHooks(ida_hexrays.Hexrays_Hooks):
         # in the hexrays microcode the callee is at the left operand
         # we check here that the type of call is global, which means it is a call to a specific function
         # and not to an interface
+        result = None
         if call_insn.l.t == ida_hexrays.mop_v:
             callee_ea = call_insn.l.g
             func_name = ida_funcs.get_func_name(callee_ea)
             if func_name in self.known_functions.keys():
-                return self.known_functions[func_name].get_decl_mi(
+                result = self.known_functions[func_name].get_decl_mi(
                     blk.mba, call_insn.ea, callee_ea
                 )
-            self.fix_call_by_ea(blk.mba, callee_ea)
+            else:
+                self.fix_call_by_ea(blk.mba, callee_ea)
+        return result
 
 
 class R14Optimizer(ida_hexrays.optinsn_t):
@@ -725,7 +728,7 @@ class R14Optimizer(ida_hexrays.optinsn_t):
                 callinfo.spoiled = spoiled_list
                 callinfo.return_argloc = ret_loc
                 callinfo.flags = ida_hexrays.FCI_NOSIDE
-                callinfo.cc = ida_typeinf.CM_CC_FASTCALL
+                callinfo.cc = go_calling_convention
 
                 # set the actual micro instruction
                 callinfo_mop.t = ida_hexrays.mop_f
@@ -739,57 +742,6 @@ class R14Optimizer(ida_hexrays.optinsn_t):
             current_insn = current_insn.next
 
         return 0
-
-
-def check_tinfo_zeroes(tinfo: ida_typeinf.tinfo_t) -> bool:
-    for i in range(tinfo.get_udt_nmembers()):
-        # find member
-        member = ida_typeinf.udt_member_t()
-        member.offset = i
-        tinfo.find_udt_member(member, ida_typeinf.STRMEM_INDEX)
-
-        # check zero_sized_members and fill them recursively
-        if member.size == 0 or check_tinfo_zeroes(member.type):
-            return True
-    return False
-
-
-def remove_tinfo_zeroes(tinfo: ida_typeinf.tinfo_t) -> bool:
-    """
-    Create a new structure without zero size members in it from the type info we receive
-    """
-
-    sid = ida_struct.add_struc(BADADDR, f"{tinfo.dstr()}_nozeroes")
-    struc = ida_struct.get_struc(sid)
-
-    for i in range(tinfo.get_udt_nmembers()):
-        # find member
-        member = ida_typeinf.udt_member_t()
-        member.offset = i
-        tinfo.find_udt_member(member, ida_typeinf.STRMEM_INDEX)
-
-        # check zero_sized members and fill them recursively
-        if member.size == 0:
-            continue
-
-        if check_tinfo_zeroes(member.type):
-            remove_tinfo_zeroes(member.type)
-            member_type = ida_typeinf.tinfo_t()
-            ida_typeinf.parse_decl(
-                member_type, None, f"{member.type.dstr()}_nozeroes;", ida_typeinf.PT_SIL
-            )
-        # member has no zero sized members we can use it as is
-        else:
-            member_type = member.type
-
-        # convert tinfo information to struct information
-        name = ida_name.validate_name(member.name, ida_name.SN_NOCHECK)
-        member_size = member.size // BYTE_SIZE
-        member_offset = member.offset // BYTE_SIZE
-
-        ida_struct.add_struc_member(struc, name, member_offset, 0, None, member_size)
-        mem = ida_struct.get_member(struc, member_offset)
-        ida_struct.set_member_tinfo(struc, mem, member_offset, member_type, 0)
 
 
 class GoAnalyzer(ida_idaapi.plugin_t):
@@ -883,7 +835,7 @@ class GoAnalyzer(ida_idaapi.plugin_t):
                 ida_typeinf.parse_decl(tinfo, None, "runtime_g;", ida_typeinf.PT_SIL)
                 remove_tinfo_zeroes(tinfo)
                 ida_typeinf.parse_decl(
-                    self.runtime_g, None, "runtime_g_nozeroes;", ida_typeinf.PT_SIL
+                    self.runtime_g, None, "runtime_g_nozeroes *;", ida_typeinf.PT_SIL
                 )
 
             # create the string struct if it doesn't already exist
