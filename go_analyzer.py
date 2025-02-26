@@ -31,7 +31,7 @@ from GoAnalyzer.utils import (
     GO_SUPPORTED,
     runtime_morestack_functions,
     remove_tinfo_zeroes,
-    go_calling_convention
+    go_calling_convention,
 )
 
 go_version_regex = re.compile("go\\d\\.(\\d{1,2})(\\.\\d{1,2})?$")
@@ -312,22 +312,21 @@ class FunctionStringVisitor(ida_hexrays.ctree_visitor_t):
             if reg_name not in go_fast_convention:
                 return 0
 
+            reg_index = go_fast_convention.index(reg_name)
             string_ref = ida_xref.get_first_dref_from(suspected_string_ref_ea)
             if string_ref == BADADDR:
                 # get the next reg in the fastcall, the next register where the string size will be stored
                 size_reg = ida_idp.str2reg(reg_name)
                 result = self.instruction_stores_valid_size(insn, size_reg)
-                if not result:
+                if not result or reg_index == 0:
                     return 0
-                lookup_reg = ida_idp.str2reg(
-                    go_fast_convention[go_fast_convention.index(reg_name) - 1]
-                )
+                lookup_reg = ida_idp.str2reg(go_fast_convention[reg_index - 1])
                 string_size = insn.Op2.value
                 check_reg = self.instruction_stores_valid_obj
             else:
-                lookup_reg = ida_idp.str2reg(
-                    go_fast_convention[go_fast_convention.index(reg_name) + 1]
-                )
+                if reg_index == len(go_fast_convention) - 1:
+                    return 0
+                lookup_reg = ida_idp.str2reg(go_fast_convention[reg_index + 1])
                 check_reg = self.instruction_stores_valid_size
 
             found = False
@@ -443,6 +442,8 @@ class CallAnalysisHooks(ida_hexrays.Hexrays_Hooks):
                         if (
                             insn.Op1.type == ida_ua.o_reg
                             and insn.Op1.reg in self.valid_reg_ids
+                            # in order to assign a value to a register we need to have a second operand
+                            and insn.Op2.dtype != ida_ua.o_void
                         ):
                             # each time we take the max register which is changed, we can assume the function
                             # wouldn't change it if it wasn't part of its result
@@ -773,10 +774,24 @@ class GoAnalyzer(ida_idaapi.plugin_t):
         if data_segment is None:
             return ida_idaapi.PLUGIN_SKIP
 
+        # in newer versions of go they had some data put before the magic string we search for
+        seg_start = data_segment.start_ea
+        binpat_vec = ida_bytes.compiled_binpat_vec_t()
+        go_buildinf_pattern = " ".join(hex(char)[2:] for char in b"\xff Go buildinf:")
+
+        ida_bytes.parse_binpat_str(binpat_vec, seg_start, go_buildinf_pattern, 0x10)
+        version_string_start = ida_bytes.bin_search(
+            seg_start, seg_start + 0x1000, binpat_vec, ida_bytes.BIN_SEARCH_FORWARD
+        )
+
+        if version_string_start == BADADDR:
+            return ida_idaapi.PLUGIN_SKIP
+
         # check the data segment if the version string length is reasonable
         VERSION_STRING_OFFSET = 0x20
-        seg_start = data_segment.start_ea
-        version_string_len = ida_bytes.get_db_byte(seg_start + VERSION_STRING_OFFSET)
+        version_string_len = ida_bytes.get_db_byte(
+            version_string_start + VERSION_STRING_OFFSET
+        )
         if (
             version_string_len is None
             or version_string_len > 15
@@ -786,7 +801,7 @@ class GoAnalyzer(ida_idaapi.plugin_t):
 
         # we probably have the go version string
         supposed_version_string = ida_bytes.get_bytes(
-            seg_start + VERSION_STRING_OFFSET + 1, version_string_len
+            version_string_start + VERSION_STRING_OFFSET + 1, version_string_len
         ).decode("ascii")
         # if it is unknown allow manual activation
         if "unknown" in supposed_version_string.lower():
@@ -826,7 +841,16 @@ class GoAnalyzer(ida_idaapi.plugin_t):
                 ida_typeinf.get_named_type(None, "runtime_g", ida_typeinf.NTF_TYPE)
                 is None
             ):
-                ida_struct.add_struc(BADADDR, "runtime_g")
+                runtime_g_struct = ida_struct.add_struc(BADADDR, "runtime_g")
+                # newer versions of ida seem to need the structure to have members in order to parse it correctly
+                ida_struct.add_struc_member(
+                    ida_struct.get_struc(runtime_g_struct),
+                    "data",
+                    BADADDR,
+                    0,
+                    None,
+                    8,
+                )
                 ida_typeinf.parse_decl(
                     self.runtime_g, None, "runtime_g;", ida_typeinf.PT_SIL
                 )
